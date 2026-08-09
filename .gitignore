@@ -1,0 +1,21 @@
+# Byte-compiled / Python files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Environment / API Keys (CRITICAL: Do not commit keys to GitHub)
+.env
+
+# Data & Workspaces
+workspace/
+data/
+node_modules/
+algora-mcp-server/node_modules/
+algora-mcp-server/dist/
+
+# Scratch & Log files
+*.log
+scratch/
+test_*.mjs
+test_*.cjs
