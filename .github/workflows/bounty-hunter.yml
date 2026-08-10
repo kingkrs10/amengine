@@ -2,8 +2,8 @@ name: Autonomous Micro-Bounty Hunter
 
 on:
   schedule:
-    # Run every 6 hours automatically
-    - cron: '0 */6 * * *'
+    # Run every 2 hours automatically
+    - cron: '0 */2 * * *'
   workflow_dispatch:
     inputs:
       limit:
