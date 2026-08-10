@@ -2,15 +2,15 @@ name: Autonomous Micro-Bounty Hunter
 
 on:
   schedule:
-    # Run every 6 hours
+    # Run every 6 hours automatically
     - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: 'Run in Dry Run mode'
-        required: true
-        default: 'false'
-        type: boolean
+      limit:
+        description: 'Bounty scan limit'
+        required: false
+        default: '30'
+        type: string
 
 jobs:
   hunt:
@@ -40,6 +40,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           DRY_RUN: 'false'
         run: |
-          python main.py --auto-live --limit 30
+          python main.py --auto-live --limit ${{ inputs.limit || '30' }}
