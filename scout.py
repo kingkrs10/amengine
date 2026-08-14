@@ -51,82 +51,103 @@ def fetch_algora_bounties(limit: int = 50) -> List[Dict[str, Any]]:
 
 def fetch_github_bounties_multi(limit_per_query: int = 15) -> List[Dict[str, Any]]:
     """Fetches open GitHub issues across multiple bounty platform keywords (Gitcoin, Polar, Opire, Algora, IssueHunt)."""
-    env = os.environ.copy()
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
     if config.GITHUB_TOKEN:
-        env["GH_TOKEN"] = config.GITHUB_TOKEN
-        env["GITHUB_TOKEN"] = config.GITHUB_TOKEN
+        headers["Authorization"] = f"token {config.GITHUB_TOKEN}"
 
     all_items = []
     seen_urls: Set[str] = set()
+    ctx = get_ssl_context()
 
     for keyword in SEARCH_PLATFORMS:
-        cmd = [
-            "gh",
-            "search",
-            "issues",
-            keyword,
-            "--state",
-            "open",
-            "--limit",
-            str(limit_per_query),
-            "--json",
-            "url,title,repository,labels,body,number",
-        ]
+        query_str = urllib.parse.quote(f"{keyword} state:open type:issue")
+        url = f"https://api.github.com/search/issues?q={query_str}&per_page={limit_per_query}"
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
-            items = json.loads(res.stdout)
-            for item in items:
-                url = item.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, context=ctx) as resp:
+                data = json.loads(resp.read().decode())
+                items = data.get("items", [])
+                for item in items:
+                    html_url = item.get("html_url", "")
+                    if html_url and html_url not in seen_urls:
+                        seen_urls.add(html_url)
 
-                    repo = item.get("repository", {})
-                    body = item.get("body", "")
-                    title = item.get("title", "")
+                        repo_url = item.get("repository_url", "")
+                        repo_parts = repo_url.split("/repos/")[-1].split("/") if "/repos/" in repo_url else ["", ""]
+                        repo_owner = repo_parts[0] if len(repo_parts) > 0 else ""
+                        repo_name = repo_parts[1] if len(repo_parts) > 1 else ""
 
-                    # Extract reward if specified
-                    reward_match = re.search(r"\$(\d+)", title + " " + body)
-                    reward_usd = float(reward_match.group(1)) if reward_match else 50.0
+                        body = item.get("body") or ""
+                        title = item.get("title") or ""
 
-                    all_items.append(
-                        {
-                            "id": f"gh-{repo.get('nameWithOwner', '')}-{item.get('number')}",
-                            "title": title,
-                            "url": url,
-                            "platform": keyword,
-                            "repo_owner": repo.get("nameWithOwner", "").split("/")[0]
-                            if "/" in repo.get("nameWithOwner", "")
-                            else "",
-                            "repo_name": repo.get("name", ""),
-                            "issue_number": item.get("number", 0),
-                            "org_handle": repo.get("nameWithOwner", "").split("/")[0]
-                            if "/" in repo.get("nameWithOwner", "")
-                            else "",
-                            "org_name": repo.get("nameWithOwner", ""),
-                            "body": body,
-                            "reward_usd": reward_usd,
-                            "reward_formatted": f"${reward_usd:.0f}",
-                            "tech": [
-                                l.get("name", "")
-                                for l in item.get("labels", [])
-                                if isinstance(l, dict)
-                            ],
-                            "status": "active",
-                        }
-                    )
+                        # Extract reward if specified
+                        reward_match = re.search(r"\$(\d+)", title + " " + body)
+                        reward_usd = float(reward_match.group(1)) if reward_match else 50.0
+
+                        all_items.append(
+                            {
+                                "id": f"gh-{repo_owner}/{repo_name}-{item.get('number')}",
+                                "title": title,
+                                "url": html_url,
+                                "platform": keyword,
+                                "repo_owner": repo_owner,
+                                "repo_name": repo_name,
+                                "issue_number": item.get("number", 0),
+                                "org_handle": repo_owner,
+                                "org_name": f"{repo_owner}/{repo_name}",
+                                "body": body,
+                                "reward_usd": reward_usd,
+                                "reward_formatted": f"${reward_usd:.0f}",
+                                "tech": [
+                                    l.get("name", "")
+                                    for l in item.get("labels", [])
+                                    if isinstance(l, dict)
+                                ],
+                                "status": "active",
+                            }
+                        )
         except Exception as e:
             print(f"[!] GitHub search error for keyword '{keyword}': {e}", file=sys.stderr)
 
     return all_items
 
 
+def check_maintainer_activity(repo_owner: str, repo_name: str, days: int = 30) -> bool:
+    """Verifies if repository maintainers have recent commits or merged PRs within the last N days."""
+    if not repo_owner or not repo_name:
+        return False
+    
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if config.GITHUB_TOKEN:
+        headers["Authorization"] = f"token {config.GITHUB_TOKEN}"
+
+    ctx = get_ssl_context()
+    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/commits?per_page=3"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, context=ctx) as resp:
+            commits = json.loads(resp.read().decode())
+            import datetime
+            now = datetime.datetime.now(datetime.timezone.utc)
+            cutoff = now - datetime.timedelta(days=days)
+            for c in commits:
+                date_str = c.get("commit", {}).get("committer", {}).get("date")
+                if date_str:
+                    c_date = datetime.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                    if c_date >= cutoff:
+                        return True
+    except Exception:
+        pass
+    return False
+
+
 def score_bounty_solvability(bounty: Dict[str, Any]) -> float:
     """
     Computes a solvability score (0.0 to 100.0) based on:
+    - Target active maintainers (merged PRs / commits in last 30 days)
     - Language / tech stack match
     - Reward range appropriateness ($10 to $500)
     - Clear title/description details
-    - Docs or simple fix keywords
     """
     score = 50.0
 
@@ -134,6 +155,14 @@ def score_bounty_solvability(bounty: Dict[str, Any]) -> float:
     body = (bounty.get("body") or "").lower()
     tech = [t.lower() for t in bounty.get("tech") or []]
     reward_usd = bounty.get("reward_usd", 0.0)
+    repo_owner = bounty.get("repo_owner", "")
+    repo_name = bounty.get("repo_name", "")
+
+    # Rule 1: Target Active Maintainers check
+    if check_maintainer_activity(repo_owner, repo_name, days=30):
+        score += 25.0
+    else:
+        score -= 20.0
 
     if config.MIN_BOUNTY_USD <= reward_usd <= config.MAX_BOUNTY_USD:
         score += 15.0
@@ -145,7 +174,7 @@ def score_bounty_solvability(bounty: Dict[str, Any]) -> float:
         lang in tech or any(lang in t for t in tech) for lang in config.TARGET_LANGUAGES
     )
     if matched_tech:
-        score += 20.0
+        score += 15.0
 
     # Platform reputational bonus
     platform = bounty.get("platform", "").lower()
@@ -167,7 +196,7 @@ def score_bounty_solvability(bounty: Dict[str, Any]) -> float:
         "cors",
     ]
     if any(kw in title or kw in body for kw in easy_keywords):
-        score += 15.0
+        score += 10.0
 
     # Penalize complex or vague keywords
     hard_keywords = [
